@@ -1,0 +1,137 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+#define TOPIC "group69SMOKE"
+
+#if CONFIG_FREERTOS_UNICORE
+#define ARDUINO_RUNNING_CORE 0
+#else
+#define ARDUINO_RUNNING_CORE 1
+#endif
+
+// Replace the next variables with your SSID/Password combination
+const char* ssid = "haseeb";
+const char* password = "pakistan123";
+
+// Add your MQTT Broker IP address, example:
+const char* mqtt_server = "broker.hivemq.com";
+
+#define SIGNAL_PIN  34
+
+QueueHandle_t queue;
+SemaphoreHandle_t xSerialSemaphore;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+void TaskSendToBroker( void *pvParameters );
+void TaskWaterLevelRead( void *pvParameters );
+
+void setup() {
+  
+  Serial.begin(9600);
+
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+
+  client.connect("ESP32CLIENT");
+
+  
+  if ( xSerialSemaphore == NULL )  // Check to confirm that the Serial Semaphore has not already been created.
+  {
+    xSerialSemaphore = xSemaphoreCreateMutex();  // Create a mutex semaphore we will use to manage the Serial Port
+    if ( ( xSerialSemaphore ) != NULL )
+      xSemaphoreGive( ( xSerialSemaphore ) );  // Make the Serial Port available for use, by "Giving" the Semaphore.
+  }
+
+ queue = xQueueCreate( 1, sizeof( int ) );
+  
+  xTaskCreatePinnedToCore(
+    TaskSendToServer
+    ,  "TaskSendToBroker"   // A name just for humans
+    ,  1024  // This stack size can be checked & adjusted by reading the Stack Highwater
+    ,  NULL
+    ,  1  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
+    ,  NULL 
+    ,  ARDUINO_RUNNING_CORE);
+
+  xTaskCreatePinnedToCore(
+    ReadSmoke
+    ,  "AnalogReadA3"
+    ,  1024  // Stack size
+    ,  NULL
+    ,  2  // Priority
+    ,  NULL 
+    ,  ARDUINO_RUNNING_CORE);
+
+ vTaskStartScheduler();
+}
+
+void loop()
+{
+  client.loop();
+}
+
+/------------------------ALL TASKS--------------------------/
+
+
+//THIS IS THE SEND USED FOR SENDING THE SMOKE SENSOR VALUES TO MQTT BROKKER
+void TaskSendToServer(void *pvParameters)  // This is a task.
+{
+  (void) pvParameters;
+  for (;;)
+  {
+       if ( xSemaphoreTake( xSerialSemaphore, ( TickType_t ) 5 ) == pdTRUE )
+        {
+            int element;
+            xQueueReceive(queue, &element, portMAX_DELAY);                    //VALUES ARE BEING RECEIEVED FROM QUESES
+            String val = String(element);
+            client.publish(TOPIC, (char*) val.c_str());                      //VALUES ARE BEING PUBLISHED TO BROKER WITH SELECTED TOPIC
+            vTaskDelay(100);                            
+            xSemaphoreGive( xSerialSemaphore );        // Now free or "Give" the Serial Port for others.
+           }
+
+        vTaskDelay(1); 
+  }
+}
+
+
+
+void ReadSmoke(void *pvParameters)  // This is a task.
+{
+    (void) pvParameters;
+    for (;;)
+    {   
+        if ( xSemaphoreTake( xSerialSemaphore, ( TickType_t ) 5 ) == pdTRUE )
+           {
+            // read the input on analog pin A3:
+            int sensorValueA3 = analogRead(SIGNAL_PIN);                           //VALUES ARE BEING READED FROM SENSOR  
+            xQueueSend(queue, &sensorValueA3, portMAX_DELAY);                     //READED VALUES ARE PUSHED TO QUEUE
+            Serial.println(sensorValueA3);
+            vTaskDelay(10); 
+            xSemaphoreGive( xSerialSemaphore );                              // Now free or "Give" the Serial Port for others.
+      }
+        
+    }
+}
+
+
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
